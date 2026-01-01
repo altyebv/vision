@@ -1,0 +1,123 @@
+{
+  "template_name": "white_transaction_log",
+  "description": "White transaction log receipt template from Bankak mobile app",
+  "receipt_type": "transaction_log",
+  "image_dimensions": {
+    "typical_width": 500,
+    "typical_height": 850,
+    "note": "These are approximate. ROI coordinates are proportional."
+  },
+  "fields": {
+    "transaction_id": {
+      "label_ar": "رقم العملية",
+      "region": {
+        "x": 20,
+        "y": 290,
+        "width": 460,
+        "height": 50
+      },
+      "value_position": "left",
+      "expected_pattern": "^\\d{11}$",
+      "preprocessing": {
+        "enhance_contrast": true,
+        "binarize": true
+      }
+    },
+    "datetime": {
+      "label_ar": "التاريخ والوقت",
+      "region": {
+        "x": 20,
+        "y": 345,
+        "width": 460,
+        "height": 50
+      },
+      "value_position": "left",
+      "expected_pattern": "\\d{2}-[A-Za-z]{3}-\\d{4}\\s+\\d{2}:\\d{2}:\\d{2}",
+      "preprocessing": {
+        "enhance_contrast": true,
+        "binarize": false
+      }
+    },
+    "from_account": {
+      "label_ar": "من",
+      "region": {
+        "x": 20,
+        "y": 510,
+        "width": 460,
+        "height": 50
+      },
+      "value_position": "left",
+      "expected_pattern": "^\\d{4}\\s?\\d{4}\\s?\\d{4}\\s?\\d{4}$",
+      "preprocessing": {
+        "enhance_contrast": true,
+        "binarize": true
+      }
+    },
+    "to_account": {
+      "label_ar": "إلى",
+      "region": {
+        "x": 20,
+        "y": 565,
+        "width": 460,
+        "height": 50
+      },
+      "value_position": "left",
+      "expected_pattern": "^\\d{4}\\s?\\d{4}\\s?\\d{4}\\s?\\d{4}$",
+      "preprocessing": {
+        "enhance_contrast": true,
+        "binarize": true
+      }
+    },
+    "receiver_name": {
+      "label_ar": "اسم المرسل اليه",
+      "region": {
+        "x": 20,
+        "y": 650,
+        "width": 460,
+        "height": 100
+      },
+      "value_position": "left",
+      "expected_pattern": null,
+      "preprocessing": {
+        "enhance_contrast": false,
+        "binarize": false
+      }
+    },
+    "comment": {
+      "label_ar": "التعليق",
+      "region": {
+        "x": 20,
+        "y": 718,
+        "width": 460,
+        "height": 100
+      },
+      "value_position": "left",
+      "expected_pattern": null,
+      "preprocessing": {
+        "enhance_contrast": false,
+        "binarize": false
+      }
+    },
+    "amount": {
+      "label_ar": "المبلغ",
+      "region": {
+        "x": 20,
+        "y": 455,
+        "width": 460,
+        "height": 50
+      },
+      "value_position": "left",
+      "expected_pattern": "^\\d{1,3}(,\\d{3})*(\\.\\d{2})?$",
+      "preprocessing": {
+        "enhance_contrast": true,
+        "binarize": true
+      }
+    }
+  },
+  "calibration_notes": {
+    "note": "These coordinates are initial estimates based on the sample image.",
+    "instructions": "Use the calibration notebook to fine-tune these coordinates.",
+    "coordinate_system": "Top-left origin, pixels from top-left corner",
+    "adjustments": "May need adjustment based on different screen resolutions"
+  }
+}
