@@ -1,5 +1,6 @@
 """
 Main processor - orchestrates the extraction pipeline.
+UPDATED: Added preprocessing step to crop white box.
 """
 import config  # Import first to fix OpenMP
 import time
@@ -12,23 +13,26 @@ from models import ExtractionResult, ReceiptType
 from ocr_engine import OCREngine
 from extractor import SmartHybridExtractor
 from validator import Validator
+from preprocessor import preprocess_receipt
 
 
 class ReceiptProcessor:
     """Main receipt processor."""
 
-    def __init__(self, ocr_engine: str = "auto"):
+    def __init__(self, ocr_engine: str = "auto", use_preprocessing: bool = True):
         """
         Initialize processor.
 
         Args:
             ocr_engine: 'easyocr', 'tesseract', or 'auto'
+            use_preprocessing: Whether to crop and normalize images
         """
         print("Initializing Receipt Processor...")
 
         self.ocr = OCREngine(engine=ocr_engine)
         self.extractor = SmartHybridExtractor(self.ocr)
         self.validator = Validator()
+        self.use_preprocessing = use_preprocessing
 
         print("✓ Processor ready\n")
 
@@ -55,12 +59,26 @@ class ReceiptProcessor:
             if image is None:
                 raise ValueError(f"Cannot load image: {image_path}")
 
+            print(f"  Original size: {image.shape[1]}x{image.shape[0]}")
+
+            # Preprocess: crop to white box and normalize
+            if self.use_preprocessing:
+                print(f"  Preprocessing...")
+                processed_image = preprocess_receipt(
+                    image,
+                    target_height=800,  # Standard height
+                    debug=save_debug
+                )
+                print(f"  Processed size: {processed_image.shape[1]}x{processed_image.shape[0]}")
+            else:
+                processed_image = image
+
             # Detect receipt type
-            receipt_type = self._detect_type(image)
+            receipt_type = self._detect_type(processed_image)
             print(f"  Type: {receipt_type.value}")
 
             # Extract fields
-            data = self.extractor.extract(image, receipt_type)
+            data = self.extractor.extract(processed_image, receipt_type)
             print(f"  Extracted fields")
 
             # Validate
@@ -83,6 +101,10 @@ class ReceiptProcessor:
                     print(f"    - {issue.field}: {issue.message}")
 
             print()
+
+            # Save debug image if requested
+            if save_debug:
+                self._save_debug_image(image_path, processed_image, result)
 
             return result
 
@@ -194,3 +216,13 @@ class ReceiptProcessor:
             return ReceiptType.GREEN
         else:
             return ReceiptType.WHITE
+
+    def _save_debug_image(self, original_path: Path, processed_image: np.ndarray,
+                         result: ExtractionResult):
+        """Save debug visualization."""
+        debug_dir = Path("debug_output")
+        debug_dir.mkdir(exist_ok=True)
+
+        debug_path = debug_dir / f"debug_{original_path.stem}.jpg"
+        cv2.imwrite(str(debug_path), processed_image)
+        print(f"  Saved debug image: {debug_path}")

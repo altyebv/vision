@@ -1,6 +1,7 @@
 """
 Validator for extracted data.
 Focuses on critical numeric fields.
+FIXED: Weighted confidence calculation (prioritize critical fields).
 """
 import re
 from typing import List, Tuple
@@ -44,12 +45,12 @@ class Validator:
         # Check if already flagged by extractor
         needs_review = data.needs_review()
 
-        # Also flag if we found errors
+        # Also flag if we found critical errors
         if any(issue.severity == 'error' for issue in issues):
             needs_review = True
 
-        # Calculate overall confidence
-        overall_confidence = self._calculate_confidence(data)
+        # Calculate overall confidence (WEIGHTED - critical fields matter more)
+        overall_confidence = self._calculate_weighted_confidence(data)
 
         return ExtractionResult(
             filename=filename,
@@ -84,11 +85,11 @@ class Validator:
             ))
 
         # Check confidence
-        if data.transaction_id.confidence < 0.95:
+        if data.transaction_id.confidence < 0.90:
             issues.append(ValidationIssue(
                 field="transaction_id",
                 severity="warning",
-                message=f"Low confidence: {data.transaction_id.confidence:.2f}"
+                message=f"Low confidence: {data.transaction_id.confidence:.2%}"
             ))
 
         return issues
@@ -109,7 +110,7 @@ class Validator:
 
         # Try to parse as number
         try:
-            amount_num = float(value.replace(',', ''))
+            amount_num = float(value.replace(',', '').replace(' ', ''))
 
             # Check reasonable range
             if amount_num <= 0:
@@ -132,11 +133,11 @@ class Validator:
             ))
 
         # Check confidence
-        if data.amount.confidence < 0.95:
+        if data.amount.confidence < 0.90:
             issues.append(ValidationIssue(
                 field="amount",
-                severity="error",
-                message=f"Low confidence on CRITICAL field: {data.amount.confidence:.2f}"
+                severity="warning",
+                message=f"Low confidence on CRITICAL field: {data.amount.confidence:.2%}"
             ))
 
         return issues
@@ -246,8 +247,45 @@ class Validator:
         except:
             return None
 
+    def _calculate_weighted_confidence(self, data: TransactionData) -> float:
+        """
+        Calculate WEIGHTED overall confidence score.
+        Critical fields (transaction_id, amount, accounts) have higher weight.
+        Text fields (receiver_name, comment) have lower weight.
+        """
+        # Define weights for each field
+        weights = {
+            'transaction_id': 2.5,  # Most critical
+            'amount': 2.5,          # Most critical
+            'from_account': 2.0,    # Very important
+            'to_account': 2.0,      # Very important
+            'datetime': 1.0,        # Important
+            'receiver_name': 0.5,   # Less critical (Arabic OCR is harder)
+            'comment': 0.3          # Least critical
+        }
+
+        weighted_sum = 0.0
+        total_weight = 0.0
+
+        for field_name, weight in weights.items():
+            conf = data.get_confidence(field_name)
+            if conf > 0:  # Field exists
+                weighted_sum += conf * weight
+                total_weight += weight
+
+        if total_weight == 0:
+            return 0.0
+
+        # Calculate weighted average
+        weighted_avg = weighted_sum / total_weight
+
+        return weighted_avg
+
     def _calculate_confidence(self, data: TransactionData) -> float:
-        """Calculate overall confidence score."""
+        """
+        Legacy method - kept for backwards compatibility.
+        Calculate simple average of critical fields only.
+        """
         critical_fields = ['transaction_id', 'amount', 'from_account', 'to_account']
 
         confidences = []

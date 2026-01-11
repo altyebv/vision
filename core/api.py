@@ -1,6 +1,6 @@
 """
 FastAPI server for receipt processing.
-Separate from main.py CLI interface.
+FIXED: Aligned endpoints with frontend API client.
 """
 import config  # Import first to fix OpenMP
 import io
@@ -104,7 +104,15 @@ class StatsResponse(BaseModel):
     auto_verified: int
     manually_reviewed: int
     avg_confidence: float
+    avg_processing_time: float
     total_amount: Optional[float] = None
+
+
+class KnownEntityResponse(BaseModel):
+    value: str
+    display_name: str
+    frequency: int
+    verified: bool
 
 
 # === Helper Functions ===
@@ -169,23 +177,26 @@ async def root():
         "service": "Receipt OCR API",
         "version": "1.0.0",
         "endpoints": {
-            "extract": "/api/extract",
-            "batch": "/api/extract/batch",
-            "pending": "/api/pending",
-            "stats": "/api/stats",
-            "export": "/api/export/excel",
+            "extract_single": "/api/extract/single",
+            "extract_batch": "/api/extract/batch",
+            "receipts": "/api/receipts",
+            "transactions": "/api/transactions",
+            "accounts": "/api/accounts",
+            "stats": "/api/statistics",
             "docs": "/docs"
         }
     }
 
 
-@app.post("/api/extract", response_model=ExtractionResponse)
-async def extract_receipt(
+# === OCR Extraction Endpoints ===
+
+@app.post("/api/extract/single", response_model=ExtractionResponse)
+async def extract_single_receipt(
         file: UploadFile = File(...),
-        save_to_db: bool = Query(True, description="Save result to database")
+        save_to_db: bool = Query(False, description="Save result to database")
 ):
     """
-    Extract data from a single receipt image.
+    Extract data from a single receipt image (without saving).
 
     Args:
         file: Receipt image (PNG, JPG, JPEG)
@@ -215,7 +226,7 @@ async def extract_receipt(
         # Process
         result = proc.process(temp_path)
 
-        # Save to database
+        # Save to database if requested
         db_id = None
         if save_to_db:
             db = get_database()
@@ -231,9 +242,9 @@ async def extract_receipt(
 
 
 @app.post("/api/extract/batch", response_model=BatchResponse)
-async def extract_batch(
+async def extract_batch_receipts(
         files: List[UploadFile] = File(...),
-        save_to_db: bool = Query(True, description="Save results to database")
+        save_to_db: bool = Query(False, description="Save results to database")
 ):
     """
     Extract data from multiple receipt images.
@@ -273,7 +284,7 @@ async def extract_batch(
         # Process batch
         results = proc.process_batch(temp_paths)
 
-        # Save to database
+        # Save to database if requested
         db_ids = []
         if save_to_db:
             db = get_database()
@@ -306,92 +317,92 @@ async def extract_batch(
         raise HTTPException(500, f"Batch processing failed: {str(e)}")
 
 
-@app.post("/api/validate")
-async def validate_extraction(data: dict):
+# === Receipt Management Endpoints (matches frontend API) ===
+
+@app.post("/api/receipts")
+async def save_confirmed_receipt(data: dict):
     """
-    Validate extracted data without processing image.
+    Save confirmed receipt data to database.
+    This is called after user reviews and confirms the data.
 
     Args:
-        data: Extracted field data
+        data: Confirmed receipt data
 
     Returns:
-        Validation results
+        Save result with transaction ID
     """
-    from validator import Validator
-
     try:
-        validator = Validator()
+        db = get_database()
 
-        # Reconstruct TransactionData from dict
+        # Create a minimal ExtractionResult from the confirmed data
         from models import TransactionData, FieldResult
 
         field_results = {}
-        for field_name, field_data in data.items():
-            if field_data:
-                field_results[field_name] = FieldResult(
-                    value=field_data['value'],
-                    confidence=field_data['confidence'],
-                    raw_text=field_data.get('raw_text', ''),
-                    needs_review=field_data.get('needs_review', False)
-                )
+        for field_name in ['transaction_id', 'datetime', 'from_account',
+                          'to_account', 'receiver_name', 'comment', 'amount']:
+            if field_name in data and data[field_name]:
+                value = data[field_name]
+                if isinstance(value, dict):
+                    field_results[field_name] = FieldResult(
+                        value=value.get('value', ''),
+                        confidence=value.get('confidence', 1.0),
+                        raw_text=value.get('raw_text', ''),
+                        needs_review=False
+                    )
+                else:
+                    field_results[field_name] = FieldResult(
+                        value=str(value),
+                        confidence=1.0,
+                        raw_text=str(value),
+                        needs_review=False
+                    )
 
         transaction_data = TransactionData(**field_results)
 
-        # Validate
-        result = validator.validate(
-            transaction_data,
-            ReceiptType.UNKNOWN,
-            "manual_validation",
-            0.0
+        result = ExtractionResult(
+            filename=data.get('filename', 'manual_entry.jpg'),
+            receipt_type=ReceiptType.GREEN,
+            data=transaction_data,
+            issues=[],
+            overall_confidence=1.0,
+            needs_review=False,
+            processing_time=0.0
         )
 
-        return convert_result_to_response(result)
+        transaction_id = db.save_result(result)
+
+        return {
+            "status": "ok",
+            "message": "Receipt saved successfully",
+            "id": transaction_id
+        }
 
     except Exception as e:
-        raise HTTPException(500, f"Validation failed: {str(e)}")
+        raise HTTPException(500, f"Save failed: {str(e)}")
 
 
-@app.get("/api/pending", response_model=List[ExtractionResponse])
-async def get_pending_reviews():
-    """Get all receipts pending manual review."""
+@app.get("/api/receipts/check-duplicate/{transaction_id}")
+async def check_duplicate_receipt(transaction_id: str):
+    """
+    Check if transaction ID already exists.
+
+    Args:
+        transaction_id: Transaction ID to check
+
+    Returns:
+        {"exists": bool, "transaction_id": str}
+    """
     try:
         db = get_database()
-        pending = db.get_pending_reviews()
+        exists = db.check_duplicate(transaction_id)
 
-        # Convert to response format
-        results = []
-        for record in pending:
-            # Reconstruct result from DB record
-            from models import TransactionData, FieldResult
-
-            field_data = {}
-            for field in ['transaction_id', 'datetime', 'from_account',
-                          'to_account', 'receiver_name', 'comment', 'amount']:
-                value = record.get(field)
-                if value:
-                    field_data[field] = FieldResult(
-                        value=value,
-                        confidence=record.get(f'{field}_confidence', 0.0),
-                        raw_text=value,
-                        needs_review=True
-                    )
-
-            result = ExtractionResult(
-                filename=record['filename'],
-                receipt_type=ReceiptType[record['receipt_type']],
-                data=TransactionData(**field_data),
-                issues=[],
-                overall_confidence=record['overall_confidence'],
-                needs_review=True,
-                processing_time=0.0
-            )
-
-            results.append(convert_result_to_response(result, record['id']))
-
-        return results
+        return {
+            "exists": exists,
+            "transaction_id": transaction_id
+        }
 
     except Exception as e:
-        raise HTTPException(500, f"Failed to fetch pending reviews: {str(e)}")
+        raise HTTPException(500, f"Duplicate check failed: {str(e)}")
 
 
 @app.put("/api/receipts/{receipt_id}")
@@ -408,20 +419,297 @@ async def update_receipt(receipt_id: int, data: dict):
     """
     try:
         db = get_database()
-
-        # Update in database
         db.update_receipt(receipt_id, data)
 
-        return {"status": "ok", "message": "Receipt updated", "id": receipt_id}
+        return {
+            "status": "ok",
+            "message": "Receipt updated successfully",
+            "id": receipt_id
+        }
 
     except Exception as e:
         raise HTTPException(500, f"Update failed: {str(e)}")
 
 
-@app.get("/api/stats", response_model=StatsResponse)
-async def get_stats(days: int = Query(30, description="Number of days to include")):
+@app.delete("/api/receipts/{receipt_id}")
+async def delete_receipt(receipt_id: int):
+    """Delete a receipt from database."""
+    try:
+        db = get_database()
+        db.delete_receipt(receipt_id)
+
+        return {
+            "status": "ok",
+            "message": "Receipt deleted successfully",
+            "id": receipt_id
+        }
+
+    except Exception as e:
+        raise HTTPException(500, f"Delete failed: {str(e)}")
+
+
+# === Account Management Endpoints (for autocomplete) ===
+
+@app.get("/api/accounts/known", response_model=List[KnownEntityResponse])
+async def get_known_accounts():
     """
-    Get processing statistics.
+    Get all known accounts for autocomplete.
+    Returns both from_account and to_account entities.
+
+    Returns:
+        List of known accounts with frequencies
+    """
+    try:
+        db = get_database()
+
+        # Get known from_accounts
+        from_accounts = db.get_known_entities('from_account', limit=50)
+
+        # Get known to_accounts
+        to_accounts = db.get_known_entities('to_account', limit=50)
+
+        # Combine and deduplicate
+        all_accounts = {}
+        for acc in from_accounts + to_accounts:
+            key = acc['value']
+            if key not in all_accounts or acc['verified']:
+                all_accounts[key] = acc
+
+        # Convert to response format
+        results = [
+            KnownEntityResponse(**acc)
+            for acc in all_accounts.values()
+        ]
+
+        # Sort by verified, then frequency
+        results.sort(key=lambda x: (not x.verified, -x.frequency))
+
+        return results
+
+    except Exception as e:
+        raise HTTPException(500, f"Failed to fetch accounts: {str(e)}")
+
+
+@app.get("/api/accounts/search", response_model=List[KnownEntityResponse])
+async def search_accounts(q: str = Query(..., min_length=1)):
+    """
+    Search for accounts by number or name.
+
+    Args:
+        q: Search query
+
+    Returns:
+        Matching accounts
+    """
+    try:
+        db = get_database()
+
+        # Search in both from_account and to_account
+        from_results = db.search_entities('from_account', q, limit=25)
+        to_results = db.search_entities('to_account', q, limit=25)
+
+        # Search in receiver names (they're linked to accounts)
+        name_results = db.search_entities('receiver_name', q, limit=25)
+
+        # Combine and deduplicate
+        all_results = {}
+        for result in from_results + to_results:
+            key = result['value']
+            if key not in all_results:
+                all_results[key] = result
+
+        # Add names with their linked accounts
+        for name in name_results:
+            # The display_name stores the account number for names
+            if name['display_name'] and name['display_name'] != name['value']:
+                account_num = name['display_name']
+                if account_num not in all_results:
+                    all_results[account_num] = {
+                        'value': account_num,
+                        'display_name': name['value'],  # Use name as display
+                        'frequency': name['frequency'],
+                        'verified': name['verified']
+                    }
+
+        results = [KnownEntityResponse(**acc) for acc in all_results.values()]
+        results.sort(key=lambda x: (not x.verified, -x.frequency))
+
+        return results
+
+    except Exception as e:
+        raise HTTPException(500, f"Search failed: {str(e)}")
+
+
+# === Transaction Query Endpoints ===
+
+@app.get("/api/transactions")
+async def query_transactions(
+    from_account: Optional[str] = None,
+    to_account: Optional[str] = None,
+    receiver_name: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    min_amount: Optional[float] = None,
+    max_amount: Optional[float] = None,
+):
+    """
+    Query transactions with filters.
+
+    Args:
+        from_account: Filter by from account
+        to_account: Filter by to account
+        receiver_name: Filter by receiver name
+        date_from: Start date (YYYY-MM-DD)
+        date_to: End date (YYYY-MM-DD)
+        min_amount: Minimum amount
+        max_amount: Maximum amount
+
+    Returns:
+        List of matching transactions
+    """
+    try:
+        db = get_database()
+
+        filters = {
+            'from_account': from_account,
+            'to_account': to_account,
+            'receiver_name': receiver_name,
+            'date_from': date_from,
+            'date_to': date_to,
+            'min_amount': min_amount,
+            'max_amount': max_amount
+        }
+
+        # Remove None values
+        filters = {k: v for k, v in filters.items() if v is not None}
+
+        transactions = db.query_transactions(filters)
+
+        return {
+            "total": len(transactions),
+            "transactions": transactions
+        }
+
+    except Exception as e:
+        raise HTTPException(500, f"Query failed: {str(e)}")
+
+
+@app.get("/api/transactions/{transaction_id}")
+async def get_transaction_by_id(transaction_id: str):
+    """
+    Get transaction by transaction ID (not database ID).
+
+    Args:
+        transaction_id: Transaction ID from receipt
+
+    Returns:
+        Transaction data
+    """
+    try:
+        db = get_database()
+
+        # Search for transaction by transaction_id field
+        filters = {'transaction_id': transaction_id}
+        results = db.query_transactions(filters)
+
+        if not results:
+            raise HTTPException(404, f"Transaction {transaction_id} not found")
+
+        return results[0]
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Failed to fetch transaction: {str(e)}")
+
+
+@app.get("/api/transactions/export")
+async def export_transactions(
+    format: str = Query('json', regex='^(json|csv)$'),
+    from_account: Optional[str] = None,
+    to_account: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+):
+    """
+    Export transactions to JSON or CSV.
+
+    Args:
+        format: 'json' or 'csv'
+        from_account: Filter by from account
+        to_account: Filter by to account
+        date_from: Start date
+        date_to: End date
+
+    Returns:
+        File download
+    """
+    try:
+        db = get_database()
+
+        filters = {
+            'from_account': from_account,
+            'to_account': to_account,
+            'date_from': date_from,
+            'date_to': date_to
+        }
+        filters = {k: v for k, v in filters.items() if v is not None}
+
+        transactions = db.query_transactions(filters)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        if format == 'json':
+            filename = f"transactions_{timestamp}.json"
+            content = json.dumps(transactions, indent=2, default=str)
+
+            return StreamingResponse(
+                io.BytesIO(content.encode()),
+                media_type="application/json",
+                headers={"Content-Disposition": f"attachment; filename={filename}"}
+            )
+
+        else:  # csv
+            # Flatten transactions for CSV
+            flattened = []
+            for trans in transactions:
+                flat = {
+                    'id': trans['id'],
+                    'filename': trans['filename'],
+                    'receipt_type': trans['receipt_type'],
+                    'created_at': trans['created_at']
+                }
+
+                # Add field values
+                for field_name, field_data in trans.get('fields', {}).items():
+                    flat[field_name] = field_data.get('field_value', '')
+
+                flattened.append(flat)
+
+            df = pd.DataFrame(flattened)
+
+            output = io.StringIO()
+            df.to_csv(output, index=False)
+            output.seek(0)
+
+            filename = f"transactions_{timestamp}.csv"
+
+            return StreamingResponse(
+                io.BytesIO(output.getvalue().encode()),
+                media_type="text/csv",
+                headers={"Content-Disposition": f"attachment; filename={filename}"}
+            )
+
+    except Exception as e:
+        raise HTTPException(500, f"Export failed: {str(e)}")
+
+
+# === Statistics Endpoints ===
+
+@app.get("/api/statistics", response_model=StatsResponse)
+async def get_statistics(days: int = Query(30, description="Number of days")):
+    """
+    Get dashboard statistics.
 
     Args:
         days: Number of days to include (default: 30)
@@ -439,73 +727,22 @@ async def get_stats(days: int = Query(30, description="Number of days to include
         raise HTTPException(500, f"Failed to fetch stats: {str(e)}")
 
 
-@app.get("/api/export/excel")
-async def export_excel(
-        days: int = Query(7, description="Number of days to include"),
-        include_pending: bool = Query(True, description="Include pending reviews")
-):
-    """
-    Export receipts to Excel file.
+# === Pending Reviews (for review workflow) ===
 
-    Args:
-        days: Number of days to include
-        include_pending: Whether to include pending reviews
-
-    Returns:
-        Excel file download
-    """
+@app.get("/api/pending")
+async def get_pending_reviews():
+    """Get all receipts pending manual review."""
     try:
         db = get_database()
+        pending = db.get_pending_reviews()
 
-        # Fetch data
-        receipts = db.get_receipts(days=days, include_pending=include_pending)
-
-        if not receipts:
-            raise HTTPException(404, "No receipts found")
-
-        # Convert to DataFrame
-        df = pd.DataFrame(receipts)
-
-        # Reorder columns
-        columns = [
-            'id', 'filename', 'receipt_type', 'transaction_id', 'datetime',
-            'from_account', 'to_account', 'receiver_name', 'comment',
-            'amount', 'overall_confidence', 'needs_review', 'created_at'
-        ]
-        df = df[[col for col in columns if col in df.columns]]
-
-        # Create Excel file in memory
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='Receipts')
-
-        output.seek(0)
-
-        # Generate filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"receipts_{timestamp}.xlsx"
-
-        return StreamingResponse(
-            output,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
-        )
+        return {
+            "total": len(pending),
+            "receipts": pending
+        }
 
     except Exception as e:
-        raise HTTPException(500, f"Export failed: {str(e)}")
-
-
-@app.delete("/api/receipts/{receipt_id}")
-async def delete_receipt(receipt_id: int):
-    """Delete a receipt from database."""
-    try:
-        db = get_database()
-        db.delete_receipt(receipt_id)
-
-        return {"status": "ok", "message": "Receipt deleted", "id": receipt_id}
-
-    except Exception as e:
-        raise HTTPException(500, f"Delete failed: {str(e)}")
+        raise HTTPException(500, f"Failed to fetch pending reviews: {str(e)}")
 
 
 # === Error Handlers ===
