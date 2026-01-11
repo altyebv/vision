@@ -463,7 +463,7 @@ def main():
         elif args.mode == 'test-boxes':
             if not args.input:
                 print("❌ Error: --input required for test-boxes mode")
-                print("Usage: python main.py test-boxes --input path/to/receipt.jpg")
+                print("Usage: python mainn.py test-boxes --input path/to/receipt.jpg")
                 sys.exit(1)
 
             if not Path(args.input).exists():
